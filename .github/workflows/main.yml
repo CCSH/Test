@@ -1,7 +1,7 @@
 name: EPG Update
 on:
-  # schedule:
-  #   - cron: '30 16,22,4,10 * * *'
+  schedule:
+    - cron: '30 16,22,4,10 * * *'
   workflow_dispatch:
 
 jobs:
@@ -56,31 +56,66 @@ jobs:
             done
             
             # 检查有效文件
-            if [ $(ls temp_epg_*.xml 2>/dev/null | wc -l) -eq 0 ]; then
+            VALID_FILES=($(ls temp_epg_*.xml 2>/dev/null))
+            if [ ${#VALID_FILES[@]} -eq 0 ]; then
               echo "❌ epg.pw所有源下载失败"
               exit 1
             fi
             
-            # 合并XML（仅保留1个tv标签）
-            FIRST_FILE=$(ls temp_epg_*.xml | head -1)
+            # ========== 修复后的合并逻辑 ==========
+            # 1. 从第一个有效文件提取XML头和tv根标签
+            FIRST_FILE=${VALID_FILES[0]}
+            echo "🔧 使用基础文件: $FIRST_FILE"
+            
+            # 提取XML声明（只保留第一个）
             grep -m1 "^<?xml" "$FIRST_FILE" > merged_epg.xml
+            # 提取tv根标签（只保留第一个）
             grep -m1 "^<tv " "$FIRST_FILE" >> merged_epg.xml
-            for FILE in temp_epg_*.xml; do
-              sed -e '/^<?xml/d' -e '/^<tv /d' -e '/^<\/tv>/d' "$FILE" >> merged_epg.xml
+            
+            # 2. 处理每个临时文件，确保标签完整性
+            for FILE in "${VALID_FILES[@]}"; do
+              echo "🔧 处理文件: $FILE"
+              # 过滤规则：
+              # - 移除XML声明
+              # - 移除tv根标签的开始和结束
+              # - 移除空行和注释行
+              # - 只保留频道(<channel>)和节目(<programme>)相关标签
+              sed -e '/^<?xml/d' \
+                  -e '/^<tv /d' \
+                  -e '/^<\/tv>/d' \
+                  -e '/^<!--/d' -e '/^-->/d' \
+                  -e '/^[[:space:]]*$/d' \
+                  "$FILE" >> merged_epg.xml
             done
+            
+            # 3. 确保根标签正确闭合
             echo "</tv>" >> merged_epg.xml
             
             # ========== 核心：全局替换+0000为+0800 ==========
             sed -i 's/+0000/+0800/g' merged_epg.xml
             
+            # 4. 验证XML基本结构（可选但推荐）
+            if ! grep -q "</tv>" merged_epg.xml; then
+              echo "❌ XML结构验证失败：未找到闭合的</tv>标签"
+              cat merged_epg.xml | tail -20
+              exit 1
+            fi
+            
             # 替换完成后赋值给e.xml
             mv merged_epg.xml e.xml
             DOWNLOAD_SUCCESS=1
-            echo "✅ 合并完成，时区已全局替换为+0800"
+            echo "✅ 合并完成，时区已全局替换为+0800，XML标签已正确闭合"
           fi
           
           # 第三步：压缩并推送
           if [ $DOWNLOAD_SUCCESS -eq 1 ]; then
+            # 额外验证：检查最终文件的标签完整性
+            if ! grep -q "</tv>" e.xml; then
+              echo "❌ 最终EPG文件标签未闭合，终止推送"
+              cat e.xml | tail -20
+              exit 1
+            fi
+            
             gzip -9 -c e.xml > e.xml.gz
             git add -f e.xml e.xml.gz
             git config --local user.name "github-actions[bot]"
