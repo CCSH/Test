@@ -47,7 +47,7 @@ jobs:
             echo "ℹ️ 普通源失败，合并epg.pw的CN/HK/TW源"
             # 下载三个源
             EPG_PW_SOURCES=(
-              "https://epg.pw/xmltv/epg_CN.xml"
+              # "https://epg.pw/xmltv/epg_CN.xml"
               "https://epg.pw/xmltv/epg_HK.xml"
               "https://epg.pw/xmltv/epg_TW.xml"
             )
