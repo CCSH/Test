@@ -20,7 +20,6 @@ jobs:
 
       - name: 下载合并去重
         run: |
-        run: |
           # ===================== 源配置 =====================
           EPG_SOURCES=(
             "http://epg.51zmt.top:8000/e1.xml.gz"
@@ -62,12 +61,14 @@ jobs:
             opencc -i "$f" -o "$f" -c t2s.json || true
           done
 
-          # ==================== 【完整提取】整个 channel 和 programme 标签块 ====================
+          # ==================== 【稳定提取】只保留完整闭合的标签 ====================
           > temp_all.txt
           for FILE in temp_*.xml; do
             awk '
-              /<channel /,/<\/channel>/ { print }
-              /<programme /,/<\/programme>/ { print }
+              /<channel / { in_channel=1; current="" }
+              in_channel { current=current $0 ORS; if(/<\/channel>/) { print current; in_channel=0 } }
+              /<programme / { in_prog=1; current="" }
+              in_prog { current=current $0 ORS; if(/<\/programme>/) { print current; in_prog=0 } }
             ' "$FILE" >> temp_all.txt
           done
 
@@ -89,13 +90,12 @@ jobs:
             1
           ' temp_all.txt > temp_clean.txt
 
-          # ==================== 固定头部（顶格无缩进 · 绝对正确）====================
+          # ==================== 固定头部 ====================
           cat > e.xml << 'EOF'
           <?xml version="1.0" encoding="UTF-8"?>
-          <tv generator-info-name="聚合EPG" generator-info-url="https://github.com/CCSH/IPTV">
+          <tv generator-info-name="CCSH的聚合EPG" generator-info-url="https://github.com/CCSH/IPTV">
           EOF
 
-          # 合并内容
           cat temp_clean.txt >> e.xml
           echo "</tv>" >> e.xml
 
