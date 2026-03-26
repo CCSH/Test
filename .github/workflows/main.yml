@@ -16,8 +16,8 @@ jobs:
       - name: 安装依赖工具
         run: |
           sudo apt-get update
-          sudo apt-get install -y opencc xmlstarlet gzip
-          
+          sudo apt-get install -y opencc gzip
+
       - name: 合并EPG（先转简 → 再去重）
         run: |
           # ===================== 配置区（按优先级从上到下） =====================
@@ -40,7 +40,7 @@ jobs:
           for url in "${EPG_SOURCES[@]}"; do
             echo "下载：$url"
             tmp_raw="temp_${index}.raw"
-            wget -T 20 -t 2 -O "$tmp_raw" "$url" || { rm -f "$tmp_raw"; index=$((index+1)); continue; }
+            wget -q -T 20 -t 2 -O "$tmp_raw" "$url" || { rm -f "$tmp_raw"; index=$((index+1)); continue; }
 
             # 判断是否为 gz 压缩包，自动解压
             if file "$tmp_raw" | grep -q 'gzip compressed'; then
@@ -64,16 +64,15 @@ jobs:
           for f in temp_*.xml; do
             if [ -f "$f" ]; then
               opencc -i "$f" -o "$f" -c t2s.json
-              echo "✅ 已转换：$f"
             fi
           done
 
-          # ===================== 合并 + 去重 =====================
+          # ===================== 合并 + 去重（纯Shell 永不报错） =====================
           echo "🔗 开始合并（去重规则：优先保留前面的源）"
 
           first_file="${valid_files[0]}"
-          grep -m1 "^<?xml" "$first_file" > final_epg.xml
-          grep -m1 "^<tv " "$first_file" >> final_epg.xml
+          grep -a "<?xml" "$first_file" | head -1 > final_epg.xml
+          grep -a "<tv " "$first_file" | head -1 >> final_epg.xml
 
           declare -A seen_channel
           declare -A seen_program
@@ -82,25 +81,26 @@ jobs:
             [ ! -f "$file" ] && continue
             echo "处理：$file"
 
-            # 安全读取 channel
-            while IFS= read -r chan || [ -n "$chan" ]; do
-              [ -z "$chan" ] && continue
-              cid=$(echo "$chan" | xmlstarlet sel -t -v "string(@id)" - 2>/dev/null)
+            # 处理 channel
+            grep -a "<channel" "$file" | while IFS= read -r line; do
+              cid=$(echo "$line" | grep -oP 'id="\K[^"]+' 2>/dev/null | head -1)
               if [ -n "$cid" ] && [ -z "${seen_channel[$cid]}" ]; then
-                echo "$chan" >> final_epg.xml
+                echo "$line" >> final_epg.xml
                 seen_channel[$cid]=1
               fi
-            done < <(xmlstarlet sel -t -c "//channel" "$file" 2>/dev/null)
+            done
 
-            # 安全读取 programme
-            while IFS= read -r prog || [ -n "$prog" ]; do
-              [ -z "$prog" ] && continue
-              key=$(echo "$prog" | xmlstarlet sel -t -v "concat(@channel,@start,@stop)" - 2>/dev/null)
+            # 处理 programme
+            grep -a "<programme" "$file" | while IFS= read -r line; do
+              chan=$(echo "$line" | grep -oP 'channel="\K[^"]+' 2>/dev/null | head -1)
+              start=$(echo "$line" | grep -oP 'start="\K[^"]+' 2>/dev/null | head -1)
+              stop=$(echo "$line" | grep -oP 'stop="\K[^"]+' 2>/dev/null | head -1)
+              key="${chan}|${start}|${stop}"
               if [ -n "$key" ] && [ -z "${seen_program[$key]}" ]; then
-                echo "$prog" >> final_epg.xml
+                echo "$line" >> final_epg.xml
                 seen_program[$key]=1
               fi
-            done < <(xmlstarlet sel -t -c "//programme" "$file" 2>/dev/null)
+            done
           done
 
           echo "</tv>" >> final_epg.xml
