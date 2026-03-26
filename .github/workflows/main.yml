@@ -1,12 +1,13 @@
 name: EPG Update
 on:
-  workflow_dispatch:
+  workflow_dispatch
 
 jobs:
   run-job:
     runs-on: ubuntu-22.04
     permissions:
       contents: write
+
     steps:
       - uses: actions/checkout@v4.2.2
         with:
@@ -16,11 +17,10 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y opencc gzip
-          sudo apt clean
 
-      - name: 稳定并行下载 + 极速合并
+      - name: 下载+合并+精准去重
         run: |
-          # ===================== 配置 =====================
+          # ===================== 源配置 =====================
           EPG_SOURCES=(
             "http://epg.51zmt.top:8000/e1.xml"
             "https://raw.githubusercontent.com/kuke31/xmlgz/main/all.xml.gz"
@@ -29,102 +29,80 @@ jobs:
             #"https://epg.pw/xmltv/epg_HK.xml"
             #"https://epg.pw/xmltv/epg_TW.xml"
           )
-          # =================================================
+          # ====================================================
 
-          # 彻底清理
-          rm -rf *.xml *.gz *.raw temp_* valid_* || true
+          # 清理
+          rm -rf *.xml *.gz temp_* merged_epg.xml || true
 
-          # ========== 修复核心：并行下载（绝对不报错版） ==========
-          echo "📥 并行下载中..."
-          for url in "${EPG_SOURCES[@]}"; do
-            # 后台运行，不管成功失败
-            (
-              idx="${RANDOM}" # 用随机数避免冲突
-              f="temp_${idx}.raw"
-              wget -q -T 15 -t 1 -O "$f" "$url" || true
-              
-              # 如果文件大小大于0，才解压/移动
-              if [ -s "$f" ]; then
-                if file -b "$f" | grep -q gzip; then
-                  gunzip -c "$f" > "temp_${idx}.xml" 2>/dev/null || true
-                else
-                  mv "$f" "temp_${idx}.xml" 2>/dev/null || true
-                fi
+          # 下载（支持gz）
+          echo "📥 下载源文件..."
+          INDEX=0
+          for URL in "${EPG_SOURCES[@]}"; do
+            TMP_RAW="temp_${INDEX}.raw"
+            wget -q -T 20 -t 2 -O "$TMP_RAW" "$URL" || true
+
+            if [ -s "$TMP_RAW" ]; then
+              if file -b "$TMP_RAW" | grep -q gzip; then
+                gunzip -c "$TMP_RAW" > "temp_${INDEX}.xml"
+              else
+                mv "$TMP_RAW" "temp_${INDEX}.xml"
               fi
-              rm -f "$f"
-            ) &
+            fi
+            rm -f "$TMP_RAW"
+            INDEX=$((INDEX+1))
           done
-          # 等待所有后台下载结束，但忽略返回码
-          wait || true
 
-          # 收集有效源（只找存在的文件）
-          valid=()
-          while IFS= read -r file; do
-            [ -f "$file" ] && valid+=("$file")
-          done < <(ls -t temp_*.xml 2>/dev/null)
-
-          if [ ${#valid[@]} -eq 0 ]; then
-            echo "❌ 所有源下载失败，无法继续"
+          # 检查有效文件
+          if [ $(ls temp_*.xml 2>/dev/null | wc -l) -eq 0 ]; then
+            echo "❌ 所有源下载失败"
             exit 1
           fi
-          echo "✅ 有效源数量: ${#valid[@]}"
 
-          # ========== 批量繁转简 ==========
-          echo "🔄 繁转简..."
-          ls temp_*.xml 2>/dev/null | xargs -P 10 -I {} opencc -i {} -o {} -c t2s.json 2>/dev/null || true
+          # 繁转简
+          echo "🔄 繁简转换..."
+          for f in temp_*.xml; do
+            opencc -i "$f" -o "$f" -c t2s.json || true
+          done
 
-          # ========== awk 极速合并去重 ==========
-          echo "🔗 合并去重..."
-          # 提取XML头部（用第一个有效源）
-          grep -a "<?xml" "${valid[0]}" | head -1 > e.xml
-          grep -a "<tv " "${valid[0]}" | head -1 >> e.xml
+          # ==================== 【你原版标准合并】 ====================
+          FIRST_FILE=$(ls temp_*.xml | head -1)
+          grep -m1 "^<?xml" "$FIRST_FILE" > merged_epg.xml
+          grep -m1 "^<tv " "$FIRST_FILE" >> merged_epg.xml
 
-          # 用 awk 高速处理
+          for FILE in temp_*.xml; do
+            sed -e '/^<?xml/d' -e '/^<tv /d' -e '/^<\/tv>/d' "$FILE" >> merged_epg.xml
+          done
+          echo "</tv>" >> merged_epg.xml
+
+          # ==================== 【精准去重：按你要求】 ====================
+          echo "🔗 开始去重：channel id + programme channel+start"
           awk '
             /<channel/ {
-              id = ""
-              if (match($0, /id="([^"]+)"/)) {
-                id = substr($0, RSTART+4, RLENGTH-5)
-              }
-              if (id != "" && !(id in seen_channel)) {
-                print $0
-                seen_channel[id] = 1
-              }
-              next
+              match($0, /id="([^"]+)"/)
+              id = substr($0, RSTART+4, RLENGTH-5)
+              if (id != "" && seen_c[id]++) next
             }
             /<programme/ {
-              chan = ""; start = ""; stop = ""
-              if (match($0, /channel="([^"]+)"/)) {
-                chan = substr($0, RSTART+8, RLENGTH-9)
-              }
-              if (match($0, /start="([^"]+)"/)) {
-                start = substr($0, RSTART+6, RLENGTH-7)
-              }
-              if (match($0, /stop="([^"]+)"/)) {
-                stop = substr($0, RSTART+5, RLENGTH-6)
-              }
-              key = chan "|" start "|" stop
-              if (key != "||" && !(key in seen_program)) {
-                print $0
-                seen_program[key] = 1
-              }
-              next
+              match($0, /channel="([^"]+)"/)
+              c = substr($0, RSTART+8, RLENGTH-9)
+              match($0, /start="([^"]+)"/)
+              s = substr($0, RSTART+6, RLENGTH-7)
+              key = c SUBSEP s
+              if (key != "" && seen_p[key]++) next
             }
             1
-          ' "${valid[@]}" >> e.xml 2>/dev/null
+          ' merged_epg.xml > e.xml
 
-          echo "</tv>" >> e.xml
-
-          # 时区修正
-          sed -i 's/+0000/+0800/g' e.xml 2>/dev/null || true
+          # 时区替换
+          sed -i 's/+0000/+0800/g' e.xml
 
           # 压缩
-          gzip -9 -c e.xml > e.xml.gz 2>/dev/null || true
+          gzip -9 -c e.xml > e.xml.gz
 
-          # 清理中间文件
-          rm -rf temp_*.xml valid_*
+          # 清理
+          rm -rf temp_*.xml merged_epg.xml
 
-      # ===================== 提交步骤（按你要求）=====================
+      # ==================== 提交（你原版格式）====================
       - name: 提交并推送结果
         run: |
           git config --local user.name "github-actions[bot]"
