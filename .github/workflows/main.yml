@@ -3,7 +3,7 @@ on:
   workflow_dispatch:
 
 jobs:
-  build:
+  run-job:
     runs-on: ubuntu-22.04
     permissions:
       contents: write
@@ -12,15 +12,16 @@ jobs:
         with:
           fetch-depth: 1
           token: ${{ secrets.GITHUB_TOKEN }}
-          
-      - name: 安装依赖工具
+
+      - name: 安装依赖
         run: |
           sudo apt-get update
           sudo apt-get install -y opencc gzip
+          sudo apt clean
 
-      - name: 合并EPG（先转简 → 再去重）
+      - name: 高性能 EPG 合并
         run: |
-          # ===================== 配置区（按优先级从上到下） =====================
+          # ===================== 配置 =====================
           EPG_SOURCES=(
             "http://epg.51zmt.top:8000/e1.xml"
             "https://raw.githubusercontent.com/kuke31/xmlgz/main/all.xml.gz"
@@ -29,102 +30,102 @@ jobs:
             "https://epg.pw/xmltv/epg_HK.xml"
             "https://epg.pw/xmltv/epg_TW.xml"
           )
-          # ====================================================================
+          # =================================================
 
-          # 清理旧文件
-          rm -rf e.xml e.xml.gz temp_*.xml final_epg.xml
+          # ========== 极速清理（最关键优化）==========
+          set -e
+          echo "🧹 清理缓存..."
+          rm -rf *.xml *.gz *.raw temp_* final_* || true
 
-          # 下载所有源（自动处理 .gz）
-          echo "📥 下载所有EPG源（支持 .xml / .xml.gz）"
+          # ========== 并行下载（速度提升巨大）==========
+          echo "📥 并行下载中..."
           index=0
           for url in "${EPG_SOURCES[@]}"; do
-            echo "下载：$url"
-            tmp_raw="temp_${index}.raw"
-            wget -q -T 20 -t 2 -O "$tmp_raw" "$url" || { rm -f "$tmp_raw"; index=$((index+1)); continue; }
-
-            # 判断是否为 gz 压缩包，自动解压
-            if file "$tmp_raw" | grep -q 'gzip compressed'; then
-              gunzip -c "$tmp_raw" > "temp_${index}.xml"
-            else
-              mv "$tmp_raw" "temp_${index}.xml"
-            fi
-            rm -f "$tmp_raw"
+            (
+              i="$index"
+              tmp_raw="temp_${i}.raw"
+              wget -q -T 15 -t 1 -O "$tmp_raw" "$url" || true
+              
+              if [ -s "$tmp_raw" ]; then
+                if file -b "$tmp_raw" | grep -q gzip; then
+                  gunzip -c "$tmp_raw" > "temp_${i}.xml"
+                else
+                  mv "$tmp_raw" "temp_${i}.xml"
+                fi
+              fi
+              rm -f "$tmp_raw"
+            ) &
             index=$((index+1))
           done
+          wait
 
-          # 检查有效文件
+          # ========== 检查有效文件 ==========
           valid_files=(temp_*.xml)
-          if [ ${#valid_files[@]} -eq 0 ] || [ ! -f "${valid_files[0]}" ]; then
-            echo "❌ 所有源下载失败"
+          if [ ${#valid_files[@]} -eq 0 ]; then
+            echo "❌ 下载失败"
             exit 1
           fi
 
-          # ===================== 繁体→简体 转换 =====================
-          echo "🔄 开始对所有文件 繁体 → 简体 转换"
-          for f in temp_*.xml; do
-            if [ -f "$f" ]; then
-              opencc -i "$f" -o "$f" -c t2s.json
-            fi
-          done
+          # ========== 批量繁转简（极快）==========
+          echo "🔄 批量繁转简..."
+          ls temp_*.xml 2>/dev/null | xargs -P 10 -I {} opencc -i {} -o {} -c t2s.json
 
-          # ===================== 合并 + 去重（纯Shell 永不报错） =====================
-          echo "🔗 开始合并（去重规则：优先保留前面的源）"
-
-          first_file="${valid_files[0]}"
-          grep -a "<?xml" "$first_file" | head -1 > final_epg.xml
-          grep -a "<tv " "$first_file" | head -1 >> final_epg.xml
+          # ========== 极速合并去重（纯grep流水线）==========
+          echo "🔗 合并去重（高性能模式）"
+          first="${valid_files[0]}"
+          grep -a "<?xml" "$first" | head -1 > final_epg.xml
+          grep -a "<tv " "$first" | head -1 >> final_epg.xml
 
           declare -A seen_channel
           declare -A seen_program
 
           for file in temp_*.xml; do
-            [ ! -f "$file" ] && continue
+            [ ! -s "$file" ] && continue
             echo "处理：$file"
 
-            # 处理 channel
+            # 极快提取 channel
             grep -a "<channel" "$file" | while IFS= read -r line; do
-              cid=$(echo "$line" | grep -oP 'id="\K[^"]+' 2>/dev/null | head -1)
-              if [ -n "$cid" ] && [ -z "${seen_channel[$cid]}" ]; then
-                echo "$line" >> final_epg.xml
+              cid=$(grep -oP 'id="\K[^"]+' <<< "$line" | head -1)
+              [ -n "$cid" ] && [ -z "${seen_channel[$cid]}" ] && {
+                echo "$line"
                 seen_channel[$cid]=1
-              fi
-            done
+              }
+            done >> final_epg.xml
 
-            # 处理 programme
+            # 极快提取 programme
             grep -a "<programme" "$file" | while IFS= read -r line; do
-              chan=$(echo "$line" | grep -oP 'channel="\K[^"]+' 2>/dev/null | head -1)
-              start=$(echo "$line" | grep -oP 'start="\K[^"]+' 2>/dev/null | head -1)
-              stop=$(echo "$line" | grep -oP 'stop="\K[^"]+' 2>/dev/null | head -1)
-              key="${chan}|${start}|${stop}"
-              if [ -n "$key" ] && [ -z "${seen_program[$key]}" ]; then
-                echo "$line" >> final_epg.xml
+              chan=$(grep -oP 'channel="\K[^"]+' <<< "$line")
+              start=$(grep -oP 'start="\K[^"]+' <<< "$line")
+              stop=$(grep -oP 'stop="\K[^"]+' <<< "$line")
+              key="$chan|$start|$stop"
+              [ -n "$key" ] && [ -z "${seen_program[$key]}" ] && {
+                echo "$line"
                 seen_program[$key]=1
-              fi
-            done
+              }
+            done >> final_epg.xml
           done
 
           echo "</tv>" >> final_epg.xml
 
-          # 时区修正
+          # ========== 时区修正 ==========
           sed -i 's/+0000/+0800/g' final_epg.xml
           mv final_epg.xml e.xml
 
-          # 压缩输出
+          # ========== 压缩 ==========
           gzip -9 -c e.xml > e.xml.gz
-          echo "✅ 全部完成"
 
-          # 提交
-          git add -f e.xml e.xml.gz
-          git config --local user.name "github-actions[bot]"
-          git config --local user.email "github-actions[bot]@users.noreply.github.com"
+          # ========== 提交 ==========
+          git config --local user.name "github-actions"
+          git config --local user.email "github-actions@github.com"
+          git add e.xml e.xml.gz
 
           if git diff --cached --quiet; then
-            echo "ℹ️ 无更新，跳过推送"
+            echo "ℹ️ 无更新"
           else
-            git commit -m "EPG Update(支持 .xml+.gz 先转简→去重): $(TZ=Asia/Shanghai date +'%Y-%m-%d %H:%M')"
+            git commit -m "EPG 极速优化版 $(TZ=Asia/Shanghai date +'%Y-%m-%d %H:%M')"
             git push --force
-            echo "✅ 推送成功"
+            echo "✅ 推送完成"
           fi
 
           # 清理
-          rm -rf temp_*.xml final_epg.xml
+          rm -rf temp_* final_*
