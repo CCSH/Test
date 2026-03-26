@@ -31,53 +31,55 @@ jobs:
           )
           # =================================================
 
-          # 清理
+          # 彻底清理
           rm -rf *.xml *.gz *.raw temp_* valid_* || true
 
-          # ========== 并行下载（容错版） ==========
+          # ========== 修复核心：并行下载（绝对不报错版） ==========
           echo "📥 并行下载中..."
-          idx=0
           for url in "${EPG_SOURCES[@]}"; do
+            # 后台运行，不管成功失败
             (
-              f="temp_$idx.raw"
-              wget -q -T 10 -t 1 -O "$f" "$url" || true
+              idx="${RANDOM}" # 用随机数避免冲突
+              f="temp_${idx}.raw"
+              wget -q -T 15 -t 1 -O "$f" "$url" || true
+              
+              # 如果文件大小大于0，才解压/移动
               if [ -s "$f" ]; then
                 if file -b "$f" | grep -q gzip; then
-                  gunzip -c "$f" > "temp_$idx.xml" || true
+                  gunzip -c "$f" > "temp_${idx}.xml" 2>/dev/null || true
                 else
-                  mv "$f" "temp_$idx.xml" || true
+                  mv "$f" "temp_${idx}.xml" 2>/dev/null || true
                 fi
-                touch "valid_$idx"
               fi
               rm -f "$f"
             ) &
-            ((idx++))
           done
-          wait
+          # 等待所有后台下载结束，但忽略返回码
+          wait || true
 
-          # 收集有效源
+          # 收集有效源（只找存在的文件）
           valid=()
-          for i in $(seq 0 $((${#EPG_SOURCES[@]}-1))); do
-            if [ -f "valid_$i" ] && [ -f "temp_$i.xml" ]; then
-              valid+=("temp_$i.xml")
-            fi
-          done
+          while IFS= read -r file; do
+            [ -f "$file" ] && valid+=("$file")
+          done < <(ls -t temp_*.xml 2>/dev/null)
 
           if [ ${#valid[@]} -eq 0 ]; then
-            echo "❌ 无有效源"
+            echo "❌ 所有源下载失败，无法继续"
             exit 1
           fi
-          echo "✅ 有效源: ${valid[@]}"
+          echo "✅ 有效源数量: ${#valid[@]}"
 
           # ========== 批量繁转简 ==========
           echo "🔄 繁转简..."
-          ls temp_*.xml 2>/dev/null | xargs -P 16 -I {} opencc -i {} -o {} -c t2s.json || true
+          ls temp_*.xml 2>/dev/null | xargs -P 10 -I {} opencc -i {} -o {} -c t2s.json 2>/dev/null || true
 
-          # ========== 兼容版 awk 极速合并去重 ==========
+          # ========== awk 极速合并去重 ==========
           echo "🔗 合并去重..."
+          # 提取XML头部（用第一个有效源）
           grep -a "<?xml" "${valid[0]}" | head -1 > e.xml
           grep -a "<tv " "${valid[0]}" | head -1 >> e.xml
 
+          # 用 awk 高速处理
           awk '
             /<channel/ {
               id = ""
@@ -109,20 +111,20 @@ jobs:
               next
             }
             1
-          ' "${valid[@]}" >> e.xml
+          ' "${valid[@]}" >> e.xml 2>/dev/null
 
           echo "</tv>" >> e.xml
 
-          # ========== 时区修正 ==========
-          sed -i 's/+0000/+0800/g' e.xml || true
+          # 时区修正
+          sed -i 's/+0000/+0800/g' e.xml 2>/dev/null || true
 
-          # ========== 压缩 ==========
-          gzip -9 -c e.xml > e.xml.gz || true
+          # 压缩
+          gzip -9 -c e.xml > e.xml.gz 2>/dev/null || true
 
-          # 清理临时文件
+          # 清理中间文件
           rm -rf temp_*.xml valid_*
 
-      # ===================== 你要的提交步骤（原样替换）=====================
+      # ===================== 提交步骤（按你要求）=====================
       - name: 提交并推送结果
         run: |
           git config --local user.name "github-actions[bot]"
