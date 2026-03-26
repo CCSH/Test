@@ -11,7 +11,6 @@ jobs:
       - uses: actions/checkout@v4.2.2
         with:
           fetch-depth: 1
-          token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: 安装依赖
         run: |
@@ -19,7 +18,7 @@ jobs:
           sudo apt-get install -y opencc gzip
           sudo apt clean
 
-      - name: 高性能 EPG 合并
+      - name: 极速合并去重
         run: |
           # ===================== 配置 =====================
           EPG_SOURCES=(
@@ -32,95 +31,83 @@ jobs:
           )
           # =================================================
 
-          # ========== 清理缓存 ==========
-          echo "🧹 清理缓存..."
+          # 清理
           rm -rf *.xml *.gz *.raw || true
 
-          # ========== 并行下载 ==========
-          echo "📥 并行下载中..."
-          index=0
+          # 并行下载
+          echo "📥 并行下载..."
+          idx=0
           for url in "${EPG_SOURCES[@]}"; do
             (
-              i="$index"
-              tmp_raw="temp_${i}.raw"
-              wget -q -T 15 -t 1 -O "$tmp_raw" "$url" || true
-              
-              if [ -s "$tmp_raw" ]; then
-                if file -b "$tmp_raw" | grep -q gzip; then
-                  gunzip -c "$tmp_raw" > "temp_${i}.xml"
+              f="temp_$idx.raw"
+              wget -q -T 10 -t 1 -O "$f" "$url"
+              if [ -s "$f" ]; then
+                if file -b "$f" | grep -q gzip; then
+                  gunzip -c "$f" > "temp_$idx.xml"
                 else
-                  mv "$tmp_raw" "temp_${i}.xml"
+                  mv "$f" "temp_$idx.xml"
                 fi
               fi
-              rm -f "$tmp_raw"
+              rm -f "$f"
             ) &
-            index=$((index+1))
+            ((idx++))
           done
           wait
 
-          # ========== 检查有效文件 ==========
-          valid_files=(temp_*.xml)
-          if [ ${#valid_files[@]} -eq 0 ]; then
-            echo "❌ 下载失败"
-            exit 1
-          fi
+          valid=(temp_*.xml)
+          [ ${#valid[@]} -eq 0 ] && exit 1
 
-          # ========== 批量繁转简 ==========
-          echo "🔄 批量繁转简..."
-          ls temp_*.xml 2>/dev/null | xargs -P 10 -I {} opencc -i {} -o {} -c t2s.json
+          # 繁转简
+          echo "🔄 繁转简..."
+          ls temp_*.xml | xargs -P 16 -I {} opencc -i {} -o {} -c t2s.json
 
-          # ========== 合并去重 ==========
-          echo "🔗 合并去重（高性能模式）"
-          first="${valid_files[0]}"
-          grep -a "<?xml" "$first" | head -1 > final_epg.xml
-          grep -a "<tv " "$first" | head -1 >> final_epg.xml
+          # ========== 核心：awk 极速合并去重 ==========
+          echo "🔗 合并去重..."
+          grep -a "<?xml" "${valid[0]}" | head -1 > e.xml
+          grep -a "<tv " "${valid[0]}" | head -1 >> e.xml
 
-          declare -A seen_channel
-          declare -A seen_program
-
-          for file in temp_*.xml; do
-            [ ! -s "$file" ] && continue
-
-            # 提取 channel
-            grep -a "<channel" "$file" | while IFS= read -r line; do
-              cid=$(grep -oP 'id="\K[^"]+' <<< "$line" | head -1)
-              [ -n "$cid" ] && [ -z "${seen_channel[$cid]}" ] && {
-                echo "$line"
-                seen_channel[$cid]=1
+          # 用 awk 一次性处理所有文件，避免循环和多次 grep
+          awk '
+            /<channel/ {
+              match($0, /id="([^"]+)"/, m)
+              id = m[1]
+              if (id != "" && !seen_channel[id]) {
+                print $0
+                seen_channel[id] = 1
               }
-            done >> final_epg.xml
-
-            # 提取 programme
-            grep -a "<programme" "$file" | while IFS= read -r line; do
-              chan=$(grep -oP 'channel="\K[^"]+' <<< "$line")
-              start=$(grep -oP 'start="\K[^"]+' <<< "$line")
-              stop=$(grep -oP 'stop="\K[^"]+' <<< "$line")
-              key="$chan|$start|$stop"
-              [ -n "$key" ] && [ -z "${seen_program[$key]}" ] && {
-                echo "$line"
-                seen_program[$key]=1
+              next
+            }
+            /<programme/ {
+              match($0, /channel="([^"]+)"/, c)
+              match($0, /start="([^"]+)"/, s)
+              match($0, /stop="([^"]+)"/, p)
+              key = c[1] "|" s[1] "|" p[1]
+              if (key != "||" && !seen_program[key]) {
+                print $0
+                seen_program[key] = 1
               }
-            done >> final_epg.xml
-          done
+              next
+            }
+            1  # 保留其他行（如display-name、title等子标签）
+          ' "${valid[@]}" >> e.xml
 
-          echo "</tv>" >> final_epg.xml
+          echo "</tv>" >> e.xml
 
-          # ========== 时区修正 ==========
-          sed -i 's/+0000/+0800/g' final_epg.xml
-          mv final_epg.xml e.xml
+          # 时区
+          sed -i 's/+0000/+0800/g' e.xml
 
-          # ========== 压缩 ==========
+          # 压缩
           gzip -9 -c e.xml > e.xml.gz
 
-          # ========== 提交 ==========
-          git config --local user.name "github-actions"
-          git config --local user.email "github-actions@github.com"
+          # 提交
+          git config user.name "bot"
+          git config user.email "bot@localhost"
           git add e.xml e.xml.gz
 
-          if git diff --cached --quiet; then
-            echo "ℹ️ 无更新"
-          else
-            git commit -m "EPG 极速优化版 $(TZ=Asia/Shanghai date +'%Y-%m-%d %H:%M')"
+          if ! git diff --cached --quiet; then
+            git commit -m "EPG Fast Merge with awk"
             git push --force
-            echo "✅ 推送完成"
           fi
+
+          # 清理
+          rm -rf temp_*.xml
