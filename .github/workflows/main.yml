@@ -61,7 +61,7 @@ jobs:
             opencc -i "$f" -o "$f" -c t2s.json || true
           done
 
-          # ==================== ✅ 修复：支持带空格缩进的标签 ====================
+          # ==================== 提取完整标签块 ====================
           > temp_all.txt
           for FILE in temp_*.xml; do
             awk '
@@ -75,21 +75,41 @@ jobs:
             ' "$FILE" >> temp_all.txt
           done
 
-          # ==================== 去重 ====================
+          # ==================== ✅ 核心修复：整块去重 ====================
+          # channel：重复ID = 整块删除
+          # programme：重复channel+start = 整块删除
           awk '
+            # --------------------------
+            # channel 整块去重
+            # --------------------------
             /<channel / {
               match($0,/id="([^"]+)"/)
-              id=substr($0,RSTART+4,RLENGTH-5)
-              if (id!="" && seen_c[id]++) next
+              id = substr($0,RSTART+4,RLENGTH-5)
+              skip_chan = (id != "" && seen_c[id]++)
+              if (skip_chan) in_skip_chan = 1
             }
+            in_skip_chan {
+              if (/<\/channel>/) in_skip_chan = 0
+              next
+            }
+
+            # --------------------------
+            # programme 整块去重
+            # --------------------------
             /<programme / {
               match($0,/channel="([^"]+)"/)
-              c=substr($0,RSTART+8,RLENGTH-9)
+              c = substr($0,RSTART+8,RLENGTH-9)
               match($0,/start="([^"]+)"/)
-              s=substr($0,RSTART+6,RLENGTH-7)
-              key=c","s
-              if (key!="," && seen_p[key]++) next
+              s = substr($0,RSTART+6,RLENGTH-7)
+              key = c "," s
+              skip_prog = (key != "," && seen_p[key]++)
+              if (skip_prog) in_skip_prog = 1
             }
+            in_skip_prog {
+              if (/<\/programme>/) in_skip_prog = 0
+              next
+            }
+
             1
           ' temp_all.txt > temp_clean.txt
 
