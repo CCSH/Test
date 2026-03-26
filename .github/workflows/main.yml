@@ -41,7 +41,6 @@ jobs:
           for URL in "${EPG_SOURCES[@]}"; do
             TMP_RAW="temp_${INDEX}.raw"
             wget -q -T 20 -t 2 -O "$TMP_RAW" "$URL" || true
-
             if [ -s "$TMP_RAW" ]; then
               if file -b "$TMP_RAW" | grep -q gzip; then
                 gunzip -c "$TMP_RAW" > "temp_${INDEX}.xml"
@@ -65,11 +64,15 @@ jobs:
             opencc -i "$f" -o "$f" -c t2s.json || true
           done
 
-          # ==================== 只提取 channel 和 programme ====================
-          echo "🔗 提取频道与节目数据..."
+          # ==================== 【完整提取】channel 和 programme 整个标签 ====================
+          echo "🔗 完整提取频道与节目数据..."
           > temp_all.txt
+
           for FILE in temp_*.xml; do
-            grep -E "<channel|<programme" "$FILE" >> temp_all.txt
+            awk '
+              /<channel/{inChan=1} inChan{print; if(/<\/channel>/)inChan=0}
+              /<programme/{inProg=1} inProg{print; if(/<\/programme>/)inProg=0}
+            ' "$FILE" >> temp_all.txt
           done
 
           # ==================== 去重 ====================
@@ -90,8 +93,8 @@ jobs:
             1
           ' temp_all.txt > temp_clean.txt
 
-          # ==================== 固定头尾拼接 ====================
-          cat > e.xml << EOF
+          # ==================== 你指定的固定头部 ====================
+          cat > e.xml << 'EOF'
           <?xml version="1.0" encoding="UTF-8"?>
           <tv generator-info-name="CCSH的聚合EPG" generator-info-url="https://github.com/CCSH/IPTV">
           EOF
