@@ -20,6 +20,7 @@ jobs:
 
       - name: 下载合并去重
         run: |
+        run: |
           # ===================== 源配置 =====================
           EPG_SOURCES=(
             "http://epg.51zmt.top:8000/e1.xml.gz"
@@ -70,7 +71,7 @@ jobs:
             ' "$FILE" >> temp_all.txt
           done
 
-          # ==================== 去重（按你要求） ====================
+          # ==================== 去重 ====================
           awk '
             /<channel / {
               match($0,/id="([^"]+)"/)
@@ -88,10 +89,10 @@ jobs:
             1
           ' temp_all.txt > temp_clean.txt
 
-          # ==================== 固定头部 ====================
+          # ==================== 固定头部（顶格无缩进 · 绝对正确）====================
           cat > e.xml << 'EOF'
           <?xml version="1.0" encoding="UTF-8"?>
-          <tv generator-info-name="CCSH的聚合EPG" generator-info-url="https://github.com/CCSH/IPTV">
+          <tv generator-info-name="聚合EPG" generator-info-url="https://github.com/CCSH/IPTV">
           EOF
 
           # 合并内容
