@@ -18,7 +18,7 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y opencc gzip
 
-      - name: 下载+合并+精准去重
+      - name: 下载+合并+去重（channel id + programme channel）
         run: |
           # ===================== 源配置 =====================
           EPG_SOURCES=(
@@ -34,7 +34,7 @@ jobs:
           # 清理
           rm -rf *.xml *.gz temp_* merged_epg.xml || true
 
-          # 下载（支持gz）
+          # 下载（支持 .gz）
           echo "📥 下载源文件..."
           INDEX=0
           for URL in "${EPG_SOURCES[@]}"; do
@@ -74,32 +74,31 @@ jobs:
           done
           echo "</tv>" >> merged_epg.xml
 
-          # ==================== 【精准去重：按你要求】 ====================
-          echo "🔗 开始去重：channel id + programme channel+start"
+          # ==================== 【正确去重】 ====================
+          # channel：按 id 去重
+          # programme：只按 channel 去重（不看 start）
+          echo "🔗 去重中…"
           awk '
             /<channel/ {
               match($0, /id="([^"]+)"/)
               id = substr($0, RSTART+4, RLENGTH-5)
-              if (id != "" && seen_c[id]++) next
+              if (id != "" && seen_channel[id]++) next
             }
             /<programme/ {
               match($0, /channel="([^"]+)"/)
-              c = substr($0, RSTART+8, RLENGTH-9)
-              match($0, /start="([^"]+)"/)
-              s = substr($0, RSTART+6, RLENGTH-7)
-              key = c SUBSEP s
-              if (key != "" && seen_p[key]++) next
+              chan = substr($0, RSTART+8, RLENGTH-9)
+              if (chan != "" && seen_program[chan]++) next
             }
             1
           ' merged_epg.xml > e.xml
 
-          # 时区替换
+          # 时区替换 +0000 → +0800
           sed -i 's/+0000/+0800/g' e.xml
 
           # 压缩
           gzip -9 -c e.xml > e.xml.gz
 
-          # 清理
+          # 清理临时文件
           rm -rf temp_*.xml merged_epg.xml
 
       # ==================== 提交（你原版格式）====================
