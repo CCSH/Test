@@ -1,7 +1,5 @@
 name: EPG Update
 on:
-  schedule:
-    - cron: '30 16,22,4,10 * * *'
   workflow_dispatch:
 
 jobs:
@@ -10,128 +8,117 @@ jobs:
     permissions:
       contents: write
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v4.2.2
         with:
           fetch-depth: 1
           token: ${{ secrets.GITHUB_TOKEN }}
           
-      - name: Update EPG Files
+      - name: 安装依赖工具
         run: |
-          # 清理旧文件
-          rm -rf e.xml e.xml.gz temp_epg_*.xml merged_epg.xml
+          sudo apt-get update
+          sudo apt-get install -y opencc xmlstarlet
           
-          # 定义普通EPG源（优先尝试）
+      - name: 合并EPG（先转简 → 再去重）
+        run: |
+          # ===================== 配置区（按优先级从上到下） =====================
           EPG_SOURCES=(
             "http://epg.51zmt.top:8000/e1.xml"
             "http://e.erw.cc/all.xml"
             "https://epg.zsdc.eu.org/t.xml"
+            "https://epg.pw/xmltv/epg.xml"
+            "https://epg.pw/xmltv/epg_CN.xml"
+            "https://epg.pw/xmltv/epg_HK.xml"
+            "https://epg.pw/xmltv/epg_TW.xml"
           )
-          
-          # 第一步：尝试下载普通单源EPG
-          DOWNLOAD_SUCCESS=0
-          # for SOURCE in "${EPG_SOURCES[@]}"; do
-          #   echo "📥 尝试下载EPG源: $SOURCE"
-          #   wget -v -T 20 -O e.xml "$SOURCE" -t 2 || true
-          #   if [ -f e.xml ] && [ -s e.xml ] && head -1 e.xml | grep -q "<?xml"; then
-          #     echo "✅ 成功下载有效EPG源: $SOURCE"
-          #     DOWNLOAD_SUCCESS=1
-          #     break
-          #   else
-          #     echo "❌ EPG源 $SOURCE 下载失败，尝试下一个"
-          #     rm -f e.xml
-          #   fi
-          # done
-          
-          # 第二步：普通源失败则合并epg.pw的CN/HK/TW源
-          if [ $DOWNLOAD_SUCCESS -eq 0 ]; then
-            echo "ℹ️ 普通源失败，合并epg.pw的CN/HK/TW源"
-            # 下载三个源
-            EPG_PW_SOURCES=(
-              "https://epg.pw/xmltv/epg_CN.xml"
-              "https://epg.pw/xmltv/epg_HK.xml"
-              "https://epg.pw/xmltv/epg_TW.xml"
-            )
-            for INDEX in "${!EPG_PW_SOURCES[@]}"; do
-              wget -v -T 20 -O "temp_epg_$INDEX.xml" "${EPG_PW_SOURCES[$INDEX]}" -t 2 || rm -f "temp_epg_$INDEX.xml"
-            done
-            
-            # 检查有效文件
-            VALID_FILES=($(ls temp_epg_*.xml 2>/dev/null))
-            if [ ${#VALID_FILES[@]} -eq 0 ]; then
-              echo "❌ epg.pw所有源下载失败"
-              exit 1
-            fi
-            
-            # ========== 修复后的合并逻辑 ==========
-            # 1. 从第一个有效文件提取XML头和tv根标签
-            FIRST_FILE=${VALID_FILES[0]}
-            echo "🔧 使用基础文件: $FIRST_FILE"
-            
-            # 提取XML声明（只保留第一个）
-            grep -m1 "^<?xml" "$FIRST_FILE" > merged_epg.xml
-            # 提取tv根标签（只保留第一个）
-            grep -m1 "^<tv " "$FIRST_FILE" >> merged_epg.xml
-            
-            # 2. 处理每个临时文件，确保标签完整性
-            for FILE in "${VALID_FILES[@]}"; do
-              echo "🔧 处理文件: $FILE"
-              # 过滤规则：
-              # - 移除XML声明
-              # - 移除tv根标签的开始和结束
-              # - 移除空行和注释行
-              # - 只保留频道(<channel>)和节目(<programme>)相关标签
-              sed -e '/^<?xml/d' \
-                  -e '/^<tv /d' \
-                  -e '/^<\/tv>/d' \
-                  -e '/^<!--/d' -e '/^-->/d' \
-                  -e '/^[[:space:]]*$/d' \
-                  "$FILE" >> merged_epg.xml
-            done
-            
-            # 3. 确保根标签正确闭合
-            echo "</tv>" >> merged_epg.xml
-            
-            # ========== 核心：全局替换+0000为+0800 ==========
-            sed -i 's/+0000/+0800/g' merged_epg.xml
-            
-            # 4. 验证XML基本结构（可选但推荐）
-            if ! grep -q "</tv>" merged_epg.xml; then
-              echo "❌ XML结构验证失败：未找到闭合的</tv>标签"
-              cat merged_epg.xml | tail -20
-              exit 1
-            fi
-            
-            # 替换完成后赋值给e.xml
-            mv merged_epg.xml e.xml
-            DOWNLOAD_SUCCESS=1
-            echo "✅ 合并完成，时区已全局替换为+0800，XML标签已正确闭合"
-          fi
-          
-          # 第三步：压缩并推送
-          if [ $DOWNLOAD_SUCCESS -eq 1 ]; then
-            # 额外验证：检查最终文件的标签完整性
-            if ! grep -q "</tv>" e.xml; then
-              echo "❌ 最终EPG文件标签未闭合，终止推送"
-              cat e.xml | tail -20
-              exit 1
-            fi
-            
-            gzip -9 -c e.xml > e.xml.gz
-            git add -f e.xml e.xml.gz
-            git config --local user.name "github-actions[bot]"
-            git config --local user.email "github-actions[bot]@users.noreply.github.com"
-            if git diff --cached --name-only | grep -q .; then
-              git fetch origin main
-              git commit -m "EPG Update: $(TZ='Asia/Shanghai' date +'%Y-%m-%d %H:%M') (CST)"
-              git push origin HEAD:$GITHUB_REF_NAME --force
-              echo "✅ 推送完成"
-            else
-              echo "ℹ️ 无文件变更，跳过推送"
-            fi
-          else
-            echo "❌ 所有源下载失败，任务终止"
+          # ====================================================================
+
+          # 清理旧文件
+          rm -rf e.xml e.xml.gz temp_*.xml final_epg.xml
+
+          # 下载所有源
+          echo "📥 下载所有EPG源（按优先级）"
+          index=0
+          for url in "${EPG_SOURCES[@]}"; do
+            echo "下载：$url"
+            wget -T 20 -t 2 -O "temp_${index}.xml" "$url" || rm -f "temp_${index}.xml"
+            index=$((index+1))
+          done
+
+          # 检查有效文件
+          valid_files=(temp_*.xml)
+          if [ ${#valid_files[@]} -eq 0 ] || [ ! -f "${valid_files[0]}" ]; then
+            echo "❌ 所有源下载失败"
             exit 1
           fi
-          
-          # 清理临时文件
-          rm -rf temp_epg_*.xml merged_epg.xml
+
+          # ===================== 核心步骤：先繁体转简体 =====================
+          echo "🔄 开始对所有文件 繁体 → 简体 转换"
+          for f in temp_*.xml; do
+            if [ -f "$f" ]; then
+              opencc -i "$f" -o "$f" -c t2s.json
+              echo "✅ 已转换：$f"
+            fi
+          done
+
+          # ===================== 转换完成后：再合并 + 去重 =====================
+          echo "🔗 开始合并（去重规则：优先保留前面的源）"
+
+          # 生成XML头部
+          first_file="${valid_files[0]}"
+          grep -m1 "^<?xml" "$first_file" > final_epg.xml
+          grep -m1 "^<tv " "$first_file" >> final_epg.xml
+
+          # 去重记录（已存在的channel/programme不再添加）
+          declare -A seen_channel
+          declare -A seen_program
+
+          # 按优先级顺序合并
+          for file in temp_*.xml; do
+            [ ! -f "$file" ] && continue
+            echo "处理：$file"
+
+            # 合并频道（不重复）
+            xmlstarlet sel -t -c "//channel" "$file" 2>/dev/null | while read -r chan; do
+              cid=$(echo "$chan" | xmlstarlet sel -t -v "string(@id)" - 2>/dev/null)
+              if [ -n "$cid" ] && [ -z "${seen_channel[$cid]}" ]; then
+                echo "$chan" >> final_epg.xml
+                seen_channel[$cid]=1
+              fi
+            done
+
+            # 合并节目（不重复）
+            xmlstarlet sel -t -c "//programme" "$file" 2>/dev/null | while read -r prog; do
+              key=$(echo "$prog" | xmlstarlet sel -t -v "concat(@channel,@start,@stop)" - 2>/dev/null)
+              if [ -n "$key" ] && [ -z "${seen_program[$key]}" ]; then
+                echo "$prog" >> final_epg.xml
+                seen_program[$key]=1
+              fi
+            done
+          done
+
+          # 关闭标签
+          echo "</tv>" >> final_epg.xml
+
+          # ===================== 时区修正 =====================
+          sed -i 's/+0000/+0800/g' final_epg.xml
+          mv final_epg.xml e.xml
+
+          # 压缩
+          gzip -9 -c e.xml > e.xml.gz
+          echo "✅ 全部完成：先转简 → 再去重"
+
+          # ===================== 提交 =====================
+          git add -f e.xml e.xml.gz
+          git config --local user.name "github-actions[bot]"
+          git config --local user.email "github-actions[bot]@users.noreply.github.com"
+
+          if git diff --cached --quiet; then
+            echo "ℹ️ 无更新，跳过推送"
+          else
+            git commit -m "EPG Update(先繁转简→再去重): $(TZ=Asia/Shanghai date +'%Y-%m-%d %H:%M')"
+            git push --force
+            echo "✅ 推送成功"
+          fi
+
+          # 清理
+          rm -rf temp_*.xml final_epg.xml
