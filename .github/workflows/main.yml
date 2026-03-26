@@ -32,12 +32,11 @@ jobs:
           )
           # =================================================
 
-          # ========== 极速清理（最关键优化）==========
-          set -e
+          # ========== 清理缓存 ==========
           echo "🧹 清理缓存..."
-          rm -rf *.xml *.gz *.raw temp_* final_* || true
+          rm -rf *.xml *.gz *.raw || true
 
-          # ========== 并行下载（速度提升巨大）==========
+          # ========== 并行下载 ==========
           echo "📥 并行下载中..."
           index=0
           for url in "${EPG_SOURCES[@]}"; do
@@ -66,11 +65,11 @@ jobs:
             exit 1
           fi
 
-          # ========== 批量繁转简（极快）==========
+          # ========== 批量繁转简 ==========
           echo "🔄 批量繁转简..."
           ls temp_*.xml 2>/dev/null | xargs -P 10 -I {} opencc -i {} -o {} -c t2s.json
 
-          # ========== 极速合并去重（纯grep流水线）==========
+          # ========== 合并去重 ==========
           echo "🔗 合并去重（高性能模式）"
           first="${valid_files[0]}"
           grep -a "<?xml" "$first" | head -1 > final_epg.xml
@@ -81,9 +80,8 @@ jobs:
 
           for file in temp_*.xml; do
             [ ! -s "$file" ] && continue
-            echo "处理：$file"
 
-            # 极快提取 channel
+            # 提取 channel
             grep -a "<channel" "$file" | while IFS= read -r line; do
               cid=$(grep -oP 'id="\K[^"]+' <<< "$line" | head -1)
               [ -n "$cid" ] && [ -z "${seen_channel[$cid]}" ] && {
@@ -92,7 +90,7 @@ jobs:
               }
             done >> final_epg.xml
 
-            # 极快提取 programme
+            # 提取 programme
             grep -a "<programme" "$file" | while IFS= read -r line; do
               chan=$(grep -oP 'channel="\K[^"]+' <<< "$line")
               start=$(grep -oP 'start="\K[^"]+' <<< "$line")
@@ -126,6 +124,3 @@ jobs:
             git push --force
             echo "✅ 推送完成"
           fi
-
-          # 清理
-          rm -rf temp_* final_*
