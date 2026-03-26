@@ -16,16 +16,15 @@ jobs:
       - name: 安装依赖工具
         run: |
           sudo apt-get update
-          sudo apt-get install -y opencc xmlstarlet
+          sudo apt-get install -y opencc xmlstarlet gzip
           
       - name: 合并EPG（先转简 → 再去重）
         run: |
           # ===================== 配置区（按优先级从上到下） =====================
           EPG_SOURCES=(
             "http://epg.51zmt.top:8000/e1.xml"
-            "http://e.erw.cc/all.xml"
+            "https://raw.githubusercontent.com/kuke31/xmlgz/main/all.xml.gz"
             "https://epg.zsdc.eu.org/t.xml"
-            "https://epg.pw/xmltv/epg.xml"
             "https://epg.pw/xmltv/epg_CN.xml"
             "https://epg.pw/xmltv/epg_HK.xml"
             "https://epg.pw/xmltv/epg_TW.xml"
@@ -35,12 +34,21 @@ jobs:
           # 清理旧文件
           rm -rf e.xml e.xml.gz temp_*.xml final_epg.xml
 
-          # 下载所有源
-          echo "📥 下载所有EPG源（按优先级）"
+          # 下载所有源（自动处理 .gz）
+          echo "📥 下载所有EPG源（支持 .xml / .xml.gz）"
           index=0
           for url in "${EPG_SOURCES[@]}"; do
             echo "下载：$url"
-            wget -T 20 -t 2 -O "temp_${index}.xml" "$url" || rm -f "temp_${index}.xml"
+            tmp_raw="temp_${index}.raw"
+            wget -T 20 -t 2 -O "$tmp_raw" "$url" || { rm -f "$tmp_raw"; index=$((index+1)); continue; }
+
+            # 判断是否为 gz 压缩包，自动解压
+            if file "$tmp_raw" | grep -q 'gzip compressed'; then
+              gunzip -c "$tmp_raw" > "temp_${index}.xml"
+            else
+              mv "$tmp_raw" "temp_${index}.xml"
+            fi
+            rm -f "$tmp_raw"
             index=$((index+1))
           done
 
@@ -51,7 +59,7 @@ jobs:
             exit 1
           fi
 
-          # ===================== 核心步骤：先繁体转简体 =====================
+          # ===================== 繁体→简体 转换 =====================
           echo "🔄 开始对所有文件 繁体 → 简体 转换"
           for f in temp_*.xml; do
             if [ -f "$f" ]; then
@@ -60,54 +68,52 @@ jobs:
             fi
           done
 
-          # ===================== 转换完成后：再合并 + 去重 =====================
+          # ===================== 合并 + 去重 =====================
           echo "🔗 开始合并（去重规则：优先保留前面的源）"
 
-          # 生成XML头部
           first_file="${valid_files[0]}"
           grep -m1 "^<?xml" "$first_file" > final_epg.xml
           grep -m1 "^<tv " "$first_file" >> final_epg.xml
 
-          # 去重记录（已存在的channel/programme不再添加）
           declare -A seen_channel
           declare -A seen_program
 
-          # 按优先级顺序合并
           for file in temp_*.xml; do
             [ ! -f "$file" ] && continue
             echo "处理：$file"
 
-            # 合并频道（不重复）
-            xmlstarlet sel -t -c "//channel" "$file" 2>/dev/null | while read -r chan; do
+            # 安全读取 channel
+            while IFS= read -r chan || [ -n "$chan" ]; do
+              [ -z "$chan" ] && continue
               cid=$(echo "$chan" | xmlstarlet sel -t -v "string(@id)" - 2>/dev/null)
               if [ -n "$cid" ] && [ -z "${seen_channel[$cid]}" ]; then
                 echo "$chan" >> final_epg.xml
                 seen_channel[$cid]=1
               fi
-            done
+            done < <(xmlstarlet sel -t -c "//channel" "$file" 2>/dev/null)
 
-            # 合并节目（不重复）
-            xmlstarlet sel -t -c "//programme" "$file" 2>/dev/null | while read -r prog; do
+            # 安全读取 programme
+            while IFS= read -r prog || [ -n "$prog" ]; do
+              [ -z "$prog" ] && continue
               key=$(echo "$prog" | xmlstarlet sel -t -v "concat(@channel,@start,@stop)" - 2>/dev/null)
               if [ -n "$key" ] && [ -z "${seen_program[$key]}" ]; then
                 echo "$prog" >> final_epg.xml
                 seen_program[$key]=1
               fi
-            done
+            done < <(xmlstarlet sel -t -c "//programme" "$file" 2>/dev/null)
           done
 
-          # 关闭标签
           echo "</tv>" >> final_epg.xml
 
-          # ===================== 时区修正 =====================
+          # 时区修正
           sed -i 's/+0000/+0800/g' final_epg.xml
           mv final_epg.xml e.xml
 
-          # 压缩
+          # 压缩输出
           gzip -9 -c e.xml > e.xml.gz
-          echo "✅ 全部完成：先转简 → 再去重"
+          echo "✅ 全部完成"
 
-          # ===================== 提交 =====================
+          # 提交
           git add -f e.xml e.xml.gz
           git config --local user.name "github-actions[bot]"
           git config --local user.email "github-actions[bot]@users.noreply.github.com"
@@ -115,7 +121,7 @@ jobs:
           if git diff --cached --quiet; then
             echo "ℹ️ 无更新，跳过推送"
           else
-            git commit -m "EPG Update(先繁转简→再去重): $(TZ=Asia/Shanghai date +'%Y-%m-%d %H:%M')"
+            git commit -m "EPG Update(支持 .xml+.gz 先转简→去重): $(TZ=Asia/Shanghai date +'%Y-%m-%d %H:%M')"
             git push --force
             echo "✅ 推送成功"
           fi
