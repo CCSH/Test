@@ -22,21 +22,14 @@ jobs:
         run: |
           # ===================== 源配置 =====================
           EPG_SOURCES=(
-            "http://epg.51zmt.top:8000/e1.xml.gz"
-            # "https://epg.zsdc.eu.org/t.xml.gz"
-            # "https://raw.githubusercontent.com/kuke31/xmlgz/main/e.xml.gz"
+            "http://epg.51zmt.top/8000/e1.xml.gz"
             "https://raw.githubusercontent.com/kuke31/xmlgz/main/all.xml.gz"
-            # "https://epg.pw/xmltv/epg_CN.xml"
-            # "https://epg.pw/xmltv/epg_HK.xml"
-            # "https://epg.pw/xmltv/epg_TW.xml"
           )
-          # ==================================================
 
           # 清理
           rm -rf *.xml *.gz temp_* || true
 
           # 下载
-          echo "📥 下载源文件..."
           INDEX=0
           for URL in "${EPG_SOURCES[@]}"; do
             TMP_RAW="temp_${INDEX}.raw"
@@ -59,45 +52,44 @@ jobs:
           fi
 
           # 繁简转换
-          echo "🔄 繁简转换..."
           for f in temp_*.xml; do
             opencc -i "$f" -o "$f" -c t2s.json || true
           done
 
-          # ==================== 【完整提取】channel 和 programme 整个标签 ====================
-          echo "🔗 完整提取频道与节目数据..."
+          # ==================== 【完整提取】整个 channel 和 programme 标签块 ====================
           > temp_all.txt
-
           for FILE in temp_*.xml; do
             awk '
-              /<channel/{inChan=1} inChan{print; if(/<\/channel>/)inChan=0}
-              /<programme/{inProg=1} inProg{print; if(/<\/programme>/)inProg=0}
+              /<channel /,/<\/channel>/ { print }
+              /<programme /,/<\/programme>/ { print }
             ' "$FILE" >> temp_all.txt
           done
 
-          # ==================== 去重 ====================
+          # ==================== 去重（按你要求） ====================
           awk '
-            /<channel/ {
-              match($0, /id="([^"]+)"/)
-              id = substr($0, RSTART+4, RLENGTH-5)
-              if (id != "" && seen_c[id]++) next
+            /<channel / {
+              match($0,/id="([^"]+)"/)
+              id=substr($0,RSTART+4,RLENGTH-5)
+              if (id!="" && seen_c[id]++) next
             }
-            /<programme/ {
-              match($0, /channel="([^"]+)"/)
-              c = substr($0, RSTART+8, RLENGTH-9)
-              match($0, /start="([^"]+)"/)
-              s = substr($0, RSTART+6, RLENGTH-7)
-              key = c "," s
-              if (key != "," && seen_p[key]++) next
+            /<programme / {
+              match($0,/channel="([^"]+)"/)
+              c=substr($0,RSTART+8,RLENGTH-9)
+              match($0,/start="([^"]+)"/)
+              s=substr($0,RSTART+6,RLENGTH-7)
+              key=c","s
+              if (key!="," && seen_p[key]++) next
             }
             1
           ' temp_all.txt > temp_clean.txt
 
-          # ==================== 你指定的固定头部 ====================
+          # ==================== 固定头部 ====================
           cat > e.xml << 'EOF'
           <?xml version="1.0" encoding="UTF-8"?>
           <tv generator-info-name="CCSH的聚合EPG" generator-info-url="https://github.com/CCSH/IPTV">
           EOF
+
+          # 合并内容
           cat temp_clean.txt >> e.xml
           echo "</tv>" >> e.xml
 
