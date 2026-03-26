@@ -18,25 +18,25 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y opencc gzip
 
-      - name: 下载+合并+温和去重（channel id / programme channel+start）
+      - name: 下载合并去重
         run: |
-          # ===================== 【保留你全部源】=====================
+          # ===================== 源配置 =====================
           EPG_SOURCES=(
-            # "http://epg.51zmt.top:8000/e1.xml.gz"
+            "http://epg.51zmt.top:8000/e1.xml.gz"
             # "https://epg.zsdc.eu.org/t.xml.gz"
             # "https://raw.githubusercontent.com/kuke31/xmlgz/main/e.xml.gz"
             "https://raw.githubusercontent.com/kuke31/xmlgz/main/all.xml.gz"
-            "https://epg.pw/xmltv/epg_CN.xml"
+            # "https://epg.pw/xmltv/epg_CN.xml"
             # "https://epg.pw/xmltv/epg_HK.xml"
             # "https://epg.pw/xmltv/epg_TW.xml"
           )
-          # ==========================================================
+          # ==================================================
 
           # 清理
           rm -rf *.xml *.gz temp_* || true
 
-          # 下载（支持 .gz）
-          echo "📥 下载所有源文件..."
+          # 下载
+          echo "📥 下载源文件..."
           INDEX=0
           for URL in "${EPG_SOURCES[@]}"; do
             TMP_RAW="temp_${INDEX}.raw"
@@ -59,55 +59,54 @@ jobs:
             exit 1
           fi
 
-          # 繁转简
+          # 繁简转换
           echo "🔄 繁简转换..."
           for f in temp_*.xml; do
             opencc -i "$f" -o "$f" -c t2s.json || true
           done
 
-          # ==================== 【标准合并：不去重 | 保留全部内容】====================
-          FIRST_FILE=$(ls temp_*.xml | head -1)
-          grep -m1 "^<?xml" "$FIRST_FILE" > e.xml
-          grep -m1 "^<tv " "$FIRST_FILE" >> e.xml
-
+          # ==================== 只提取 channel 和 programme ====================
+          echo "🔗 提取频道与节目数据..."
+          > temp_all.txt
           for FILE in temp_*.xml; do
-            sed -e '/^<?xml/d' \
-                -e '/^<!DOCTYPE/d' \
-                -e '/^<tv /d' \
-                -e '/^<\/tv>/d' "$FILE" >> e.xml
+            grep -E "<channel|<programme" "$FILE" >> temp_all.txt
           done
 
-          echo "</tv>" >> e.xml
-
-          # ==================== ✅ 【增加：温和去重】====================
-          echo "🔗 去重：channel(id) + programme(channel+start)"
+          # ==================== 去重 ====================
           awk '
             /<channel/ {
               match($0, /id="([^"]+)"/)
               id = substr($0, RSTART+4, RLENGTH-5)
-              if (id != "" && seen_channel[id]++) next
+              if (id != "" && seen_c[id]++) next
             }
             /<programme/ {
               match($0, /channel="([^"]+)"/)
-              chan = substr($0, RSTART+8, RLENGTH-9)
+              c = substr($0, RSTART+8, RLENGTH-9)
               match($0, /start="([^"]+)"/)
-              start = substr($0, RSTART+6, RLENGTH-7)
-              key = chan "," start
-              if (key != "," && seen_program[key]++) next
+              s = substr($0, RSTART+6, RLENGTH-7)
+              key = c "," s
+              if (key != "," && seen_p[key]++) next
             }
             1
-          ' e.xml > e_tmp.xml && mv e_tmp.xml e.xml
+          ' temp_all.txt > temp_clean.txt
 
-          # 时区替换 +0000 → +0800
+          # ==================== 固定头尾拼接 ====================
+          cat > e.xml << EOF
+          <?xml version="1.0" encoding="UTF-8"?>
+          <tv generator-info-name="CCSH的聚合EPG" generator-info-url="https://github.com/CCSH/IPTV">
+          EOF
+          cat temp_clean.txt >> e.xml
+          echo "</tv>" >> e.xml
+
+          # 时区
           sed -i 's/+0000/+0800/g' e.xml
 
           # 压缩
           gzip -9 -c e.xml > e.xml.gz
 
           # 清理
-          rm -rf temp_*.xml
+          rm -rf temp_*
 
-      # ==================== 提交（你原版格式）====================
       - name: 提交并推送结果
         run: |
           git config --local user.name "github-actions[bot]"
