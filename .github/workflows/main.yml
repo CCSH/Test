@@ -18,7 +18,7 @@ jobs:
           sudo apt-get install -y opencc gzip
           sudo apt clean
 
-      - name: 极速合并去重
+      - name: 稳定并行下载 + 极速合并
         run: |
           # ===================== 配置 =====================
           EPG_SOURCES=(
@@ -32,21 +32,22 @@ jobs:
           # =================================================
 
           # 清理
-          rm -rf *.xml *.gz *.raw || true
+          rm -rf *.xml *.gz *.raw temp_* valid_* || true
 
-          # 并行下载
-          echo "📥 并行下载..."
+          # ========== 并行下载（容错版） ==========
+          echo "📥 并行下载中..."
           idx=0
           for url in "${EPG_SOURCES[@]}"; do
             (
               f="temp_$idx.raw"
-              wget -q -T 10 -t 1 -O "$f" "$url"
+              wget -q -T 10 -t 1 -O "$f" "$url" || true
               if [ -s "$f" ]; then
                 if file -b "$f" | grep -q gzip; then
-                  gunzip -c "$f" > "temp_$idx.xml"
+                  gunzip -c "$f" > "temp_$idx.xml" || true
                 else
-                  mv "$f" "temp_$idx.xml"
+                  mv "$f" "temp_$idx.xml" || true
                 fi
+                touch "valid_$idx"
               fi
               rm -f "$f"
             ) &
@@ -54,60 +55,87 @@ jobs:
           done
           wait
 
-          valid=(temp_*.xml)
-          [ ${#valid[@]} -eq 0 ] && exit 1
+          # 收集有效源
+          valid=()
+          for i in $(seq 0 $((${#EPG_SOURCES[@]}-1))); do
+            if [ -f "valid_$i" ] && [ -f "temp_$i.xml" ]; then
+              valid+=("temp_$i.xml")
+            fi
+          done
 
-          # 繁转简
+          if [ ${#valid[@]} -eq 0 ]; then
+            echo "❌ 无有效源"
+            exit 1
+          fi
+          echo "✅ 有效源: ${valid[@]}"
+
+          # ========== 批量繁转简 ==========
           echo "🔄 繁转简..."
-          ls temp_*.xml | xargs -P 16 -I {} opencc -i {} -o {} -c t2s.json
+          ls temp_*.xml 2>/dev/null | xargs -P 16 -I {} opencc -i {} -o {} -c t2s.json || true
 
-          # ========== 核心：awk 极速合并去重 ==========
+          # ========== 兼容版 awk 极速合并去重 ==========
           echo "🔗 合并去重..."
           grep -a "<?xml" "${valid[0]}" | head -1 > e.xml
           grep -a "<tv " "${valid[0]}" | head -1 >> e.xml
 
-          # 用 awk 一次性处理所有文件，避免循环和多次 grep
           awk '
             /<channel/ {
-              match($0, /id="([^"]+)"/, m)
-              id = m[1]
-              if (id != "" && !seen_channel[id]) {
+              id = ""
+              if (match($0, /id="([^"]+)"/)) {
+                id = substr($0, RSTART+4, RLENGTH-5)
+              }
+              if (id != "" && !(id in seen_channel)) {
                 print $0
                 seen_channel[id] = 1
               }
               next
             }
             /<programme/ {
-              match($0, /channel="([^"]+)"/, c)
-              match($0, /start="([^"]+)"/, s)
-              match($0, /stop="([^"]+)"/, p)
-              key = c[1] "|" s[1] "|" p[1]
-              if (key != "||" && !seen_program[key]) {
+              chan = ""; start = ""; stop = ""
+              if (match($0, /channel="([^"]+)"/)) {
+                chan = substr($0, RSTART+8, RLENGTH-9)
+              }
+              if (match($0, /start="([^"]+)"/)) {
+                start = substr($0, RSTART+6, RLENGTH-7)
+              }
+              if (match($0, /stop="([^"]+)"/)) {
+                stop = substr($0, RSTART+5, RLENGTH-6)
+              }
+              key = chan "|" start "|" stop
+              if (key != "||" && !(key in seen_program)) {
                 print $0
                 seen_program[key] = 1
               }
               next
             }
-            1  # 保留其他行（如display-name、title等子标签）
+            1
           ' "${valid[@]}" >> e.xml
 
           echo "</tv>" >> e.xml
 
-          # 时区
-          sed -i 's/+0000/+0800/g' e.xml
+          # ========== 时区修正 ==========
+          sed -i 's/+0000/+0800/g' e.xml || true
 
-          # 压缩
-          gzip -9 -c e.xml > e.xml.gz
+          # ========== 压缩 ==========
+          gzip -9 -c e.xml > e.xml.gz || true
 
-          # 提交
-          git config user.name "bot"
-          git config user.email "bot@localhost"
+          # 清理临时文件
+          rm -rf temp_*.xml valid_*
+
+      # ===================== 你要的提交步骤（原样替换）=====================
+      - name: 提交并推送结果
+        run: |
+          git config --local user.name "github-actions[bot]"
+          git config --local user.email "github-actions[bot]@users.noreply.github.com"
+          
           git add e.xml e.xml.gz
-
-          if ! git diff --cached --quiet; then
-            git commit -m "EPG Fast Merge with awk"
-            git push --force
+          
+          if git diff --cached --quiet; then
+            echo "ℹ️ 无变更，跳过提交"
+          else
+            git commit -m "EPG更新: $(TZ=Asia/Shanghai date +'%Y-%m-%d %H:%M')"
+            git push
+            echo "✅ 推送成功"
           fi
-
-          # 清理
-          rm -rf temp_*.xml
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
