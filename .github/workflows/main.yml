@@ -61,14 +61,17 @@ jobs:
             opencc -i "$f" -o "$f" -c t2s.json || true
           done
 
-          # ==================== 【稳定提取】只保留完整闭合的标签 ====================
+          # ==================== ✅ 修复：支持带空格缩进的标签 ====================
           > temp_all.txt
           for FILE in temp_*.xml; do
             awk '
-              /<channel / { in_channel=1; current="" }
-              in_channel { current=current $0 ORS; if(/<\/channel>/) { print current; in_channel=0 } }
-              /<programme / { in_prog=1; current="" }
-              in_prog { current=current $0 ORS; if(/<\/programme>/) { print current; in_prog=0 } }
+              /^[ \t]*<channel / { inChan=1 }
+              inChan { print }
+              /^[ \t]*<\/channel>/ { inChan=0 }
+
+              /^[ \t]*<programme / { inProg=1 }
+              inProg { print }
+              /^[ \t]*<\/programme>/ { inProg=0 }
             ' "$FILE" >> temp_all.txt
           done
 
