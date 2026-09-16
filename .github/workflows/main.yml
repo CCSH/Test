@@ -83,10 +83,11 @@ jobs:
             FILE_IDX=$((FILE_IDX+1))
           done
 
-          # ==================== ✅ 整块去重 ====================
-          # channel：重复ID = 整块删除（首次出现优先）
-          # programme：同一频道 + 同一天（YYYYMMDD）= 整块删除（前一个文件已有则跳过）
-          awk '
+          # ==================== ✅ 整块去重 + 只保留当天 ====================
+          TODAY=$(TZ=Asia/Shanghai date +%Y%m%d)
+          echo "📅 只保留当天: $TODAY"
+
+          awk -v today="$TODAY" '
             /^FILEMARKER_/ {
               num = $0
               sub(/^FILEMARKER_/, "", num)
@@ -94,7 +95,9 @@ jobs:
               next
             }
 
+            # --------------------------
             # channel 整块去重（ID 维度）
+            # --------------------------
             /<channel / {
               match($0,/id="([^"]+)"/)
               id = substr($0,RSTART+4,RLENGTH-5)
@@ -106,7 +109,10 @@ jobs:
               next
             }
 
+            # --------------------------
             # programme 整块去重（channel+date 维度）
+            # 只保留当天；同频道同一天只保留第一个来源
+            # --------------------------
             /<programme / {
               match($0,/channel="([^"]+)"/)
               c = substr($0,RSTART+8,RLENGTH-9)
@@ -114,51 +120,30 @@ jobs:
               s = substr($0,RSTART+6,RLENGTH-7)
               date = substr(s,1,8)
               key = c "," date
-              if (key != "," && key in seen_p && seen_p[key] < file_idx) {
+
+              # 不是当天 → 整块跳过
+              if (date != today) {
                 in_skip_prog = 1
-              } else if (key != ",") {
-                seen_p[key] = file_idx
+              } else if (key != "," && key in seen_p && seen_p[key] < file_idx) {
+                # 当天但同频道同一天已出现过 → 整块跳过
+                in_skip_prog = 1
+              } else {
+                if (key != ",") seen_p[key] = file_idx
+                in_skip_prog = 0
+                print
               }
             }
             in_skip_prog {
               if (/<\/programme>/) in_skip_prog = 0
               next
             }
+            /<\/programme>/ {
+              print
+              next
+            }
 
             1
           ' temp_all.txt > temp_clean.txt
-
-          # ==================== ✅ 只保留当天节目 ====================
-          TODAY=$(TZ=Asia/Shanghai date +%Y%m%d)
-          echo "📅 只保留当天: $TODAY"
-
-          awk -v today="$TODAY" '
-            /<channel / { in_chan = 1 }
-            in_chan {
-              print
-              if (/<\/channel>/) in_chan = 0
-              next
-            }
-
-            /<programme / {
-              match($0,/start="([^"]+)"/)
-              s = substr($0,RSTART+6,RLENGTH-7)
-              date = substr(s,1,8)
-              if (date == today) {
-                in_prog_keep = 1
-                print
-              } else {
-                in_prog_keep = 0
-              }
-              next
-            }
-            /<\/programme>/ {
-              if (in_prog_keep) print
-              in_prog_keep = 0
-              next
-            }
-            in_prog_keep { print }
-          ' temp_clean.txt > temp_today.txt
 
           # ==================== 固定头部 ====================
           cat > e.xml << 'EOF'
@@ -166,7 +151,7 @@ jobs:
           <tv generator-info-name="CCSH的聚合EPG" generator-info-url="https://github.com/CCSH/IPTV">
           EOF
 
-          cat temp_today.txt >> e.xml
+          cat temp_clean.txt >> e.xml
           echo "</tv>" >> e.xml
 
           # 时区
