@@ -50,7 +50,7 @@ jobs:
           )
 
           # 临时文件清理
-          rm -rf temp_*.raw temp_*.xml temp_all.txt temp_clean.txt epg.xml epg.xml.gz || true
+          rm -rf temp_*.raw temp_*.xml temp_all.txt temp_clean.txt e.xml e.xml.gz || true
 
           INDEX=0
           for URL in "${EPG_SOURCES[@]}"; do
@@ -169,29 +169,29 @@ jobs:
           ' temp_all.txt > temp_clean.txt
 
           # 组装标准xmltv文档
-          cat > epg.xml <<'XMLHEAD'
+          cat > e.xml <<'XMLHEAD'
           <?xml version="1.0" encoding="UTF-8"?>
           <tv generator-info-name="CCSH的聚合EPG" generator-info-url="https://github.com/CCSH/IPTV">
           XMLHEAD
 
-          cat temp_clean.txt >> epg.xml
-          echo "</tv>" >> epg.xml
+          cat temp_clean.txt >> e.xml
+          echo "</tv>" >> e.xml
 
           # 时区修正 +0000 → +0800，清理脏字符
-          sed -i 's/+0000/+0800/g' epg.xml
-          sed -i 's/ *--免费使用//g' epg.xml
-          sed -i '/^[[:space:]]*$/d' epg.xml
+          sed -i 's/+0000/+0800/g' e.xml
+          sed -i 's/ *--免费使用//g' e.xml
+          sed -i '/^[[:space:]]*$/d' e.xml
 
           # 校验输出文件大小
-          OUT_SIZE=$(stat -c%s epg.xml)
+          OUT_SIZE=$(stat -c%s e.xml)
           if [[ $OUT_SIZE -lt 1000 ]]; then
             echo "ERROR:输出EPG文件过小，数据异常"
             exit 1
           fi
-          echo "✅ 生成epg.xml 大小: $OUT_SIZE bytes"
+          echo "✅ 生成e.xml 大小: $OUT_SIZE bytes"
 
           # 压缩gz
-          gzip -9 -c epg.xml > epg.xml.gz
+          gzip -9 -c e.xml > e.xml.gz
 
           # 清理临时文件
           rm -rf temp_*
@@ -200,14 +200,14 @@ jobs:
         run: |
           git config --local user.name "github-actions[bot]"
           git config --local user.email "github-actions[bot]@users.noreply.github.com"
-          git add epg.xml epg.xml.gz
+          git add e.xml e.xml.gz
 
           if git diff --cached --quiet; then
             echo "ℹ️ EPG内容无变化，跳过commit&push"
           else
             git commit -m "EPG Auto Update: $(TZ=Asia/Shanghai date +'%Y‑%m‑%d %H:%M CST')"
             git push
-            echo "✅ 已提交推送最新epg.xml / epg.xml.gz"
+            echo "✅ 已提交推送最新e.xml / e.xml.gz"
           fi
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
