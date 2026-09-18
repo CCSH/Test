@@ -3,30 +3,43 @@ on:
   schedule:
     - cron: '30 16,22,4,10 * * *'
   workflow_dispatch:
+    inputs:
+      only_today:
+        description: '仅保留今日节目(推荐true；false获取多日完整EPG)'
+        required: true
+        default: 'false'
+        type: choice
+        options:
+          - 'true'
+          - 'false'
 
 jobs:
   run-job:
     runs-on: ubuntu-22.04
     permissions:
       contents: write
-
     steps:
       - uses: actions/checkout@v4.2.2
         with:
           fetch-depth: 1
 
-      - name: 安装依赖
+      - name: 安装系统依赖
         run: |
-          sudo apt-get update
-          sudo apt-get install -y opencc gzip
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq opencc gzip file curl || true
 
-      - name: 下载合并去重
+      - name: 下载、合并、清洗EPG源
+        env:
+          ONLY_TODAY: ${{ github.event.inputs.only_today || 'true' }}
+          TZ: Asia/Shanghai
         run: |
-          # ===================== 源配置 =====================
+          set -euo pipefail
+
+          # ===================== 可配置 EPG源列表 =====================
           EPG_SOURCES=(
             "http://epg.51zmt.top:8000/e1.xml.gz"
             "http://epg.51zmt.top:8000/e2.xml.gz"
-            "https://gitee.com/gsls200808/xmltvepg/raw/master/e9.xml.gz"
+            # "https://gitee.com/gsls200808/xmltvepg/raw/master/e9.xml.gz"
             # "https://epg.zsdc.eu.org/t.xml.gz"
             # "https://raw.githubusercontent.com/kuke31/xmlgz/main/e.xml.gz"
             # "https://raw.githubusercontent.com/kuke31/xmlgz/main/all.xml.gz"
@@ -36,142 +49,165 @@ jobs:
             # "https://epg.pw/xmltv/epg_TW.xml"
           )
 
-          # 清理
-          rm -rf *.xml *.gz temp_* || true
+          # 临时文件清理
+          rm -rf temp_*.raw temp_*.xml temp_all.txt temp_clean.txt epg.xml epg.xml.gz || true
 
-          # 下载
           INDEX=0
           for URL in "${EPG_SOURCES[@]}"; do
             TMP_RAW="temp_${INDEX}.raw"
-            wget -q -T 20 -t 2 -O "$TMP_RAW" "$URL" || true
-            if [ -s "$TMP_RAW" ]; then
-              if file -b "$TMP_RAW" | grep -q gzip; then
-                gunzip -c "$TMP_RAW" > "temp_${INDEX}.xml"
+            echo "🔽 下载源[$INDEX]: $URL"
+            # wget：超时20s，重试2次，输出状态码
+            if wget -q -T 20 -t 2 -S -O "$TMP_RAW" "$URL" 2>wget_stderr.log; then
+              SIZE=$(stat -c%s "$TMP_RAW")
+              if [[ $SIZE -lt 200 ]]; then
+                echo "⚠️ 源[$INDEX] 返回文件过小，丢弃"
+                rm -f "$TMP_RAW"
               else
-                mv "$TMP_RAW" "temp_${INDEX}.xml"
+                # 判断是否gzip压缩
+                MIME=$(file -b --mime-type "$TMP_RAW")
+                if [[ "$MIME" == "application/gzip" || "$MIME" == "application/x-gzip" ]]; then
+                  gunzip -c "$TMP_RAW" > "temp_${INDEX}.xml"
+                else
+                  mv "$TMP_RAW" "temp_${INDEX}.xml"
+                fi
+                echo "✅ 源[$INDEX] 处理完成"
               fi
+            else
+              echo "❌ 源[$INDEX] 下载失败，跳过"
             fi
-            rm -f "$TMP_RAW"
+            rm -f "$TMP_RAW" wget_stderr.log
             INDEX=$((INDEX+1))
           done
 
-          # 检查有效文件
-          if [ $(ls temp_*.xml 2>/dev/null | wc -l) -eq 0 ]; then
-            echo "❌ 所有源下载失败"
+          VALID_FILES=$(ls temp_*.xml 2>/dev/null || true)
+          if [[ -z "$VALID_FILES" ]]; then
+            echo "ERROR: 全部EPG源下载失败，终止任务"
             exit 1
           fi
+          echo "📄 有效源文件: $VALID_FILES"
 
-          # 繁简转换
+          # 繁简转换，opencc失败则跳过不阻断流程
           for f in temp_*.xml; do
-            opencc -i "$f" -o "$f" -c t2s.json || true
+            if command -v opencc &> /dev/null; then
+              opencc -i "$f" -o "${f}.tmp" -c t2s.json && mv "${f}.tmp" "$f" || rm -f "${f}.tmp"
+            fi
           done
 
-          # ==================== 提取完整标签块 ====================
+          # --------------------------
+          # 修复原脚本缺陷：awk完整块解析，兼容标签换行
+          # 提取 <channel>...</channel> 和 <programme>...</programme> 完整块，带来源标记
+          # --------------------------
           > temp_all.txt
           FILE_IDX=0
           for FILE in temp_*.xml; do
-            printf "FILEMARKER_%d\n" "$FILE_IDX" >> temp_all.txt
+            printf "====FILE_SRC:%d====\n" "$FILE_IDX" >> temp_all.txt
             awk '
-              /^[ \t]*<channel / { inChan=1 }
-              inChan { print }
-              /^[ \t]*<\/channel>/ { inChan=0 }
+              BEGIN{ RS="</channel>"; FS=""; ORS="</channel>\n" }
+              /<channel[ >]/ { print }
+            ' "$FILE" >> temp_all.txt
 
-              /^[ \t]*<programme / { inProg=1 }
-              inProg { print }
-              /^[ \t]*<\/programme>/ { inProg=0 }
+            awk '
+              BEGIN{ RS="</programme>"; FS=""; ORS="</programme>\n" }
+              /<programme[ >]/ { print }
             ' "$FILE" >> temp_all.txt
             FILE_IDX=$((FILE_IDX+1))
           done
-          
-          TODAY=$(TZ=Asia/Shanghai date +%Y%m%d)
-          
-          awk -v today="$TODAY" '
-            /^FILEMARKER_/ {
-              num = $0
-              sub(/^FILEMARKER_/, "", num)
-              file_idx = num + 0
-              next
+
+          TODAY=$(date +%Y%m%d)
+          # 可选：保留今日+次日节目，避免零点丢失
+          if [[ "$ONLY_TODAY" == "true" ]]; then
+            TOMORROW=$(date -d "+1 day" +%Y%m%d)
+          else
+            TOMORROW=""
+          fi
+
+          awk -v today="$TODAY" -v tomorrow="$TOMORROW" -v onlyToday="$ONLY_TODAY" '
+            /^====FILE_SRC:[0-9]+====/ {
+              sub(/^====FILE_SRC:/,""); sub(/====$/,"");
+              file_idx = $0 + 0;
+              next;
             }
-          
-            # channel 去重
+
+            # channel去重：同一个id只保留先出现(优先级高的源)
             /<channel / {
-              id = ""
-              if (match($0, /id="[^"]*"/)) {
-                id = substr($0, RSTART+4, RLENGTH-5)
+              cid=""
+              if(match($0, /id="[^"]+"/)){
+                cid=substr($0,RSTART+4,RLENGTH-5);
               }
-              skip_chan = (id != "" && seen_c[id]++)
-              if (skip_chan) in_skip_chan = 1
+              if(cid != "" && (cid in seen_chan)) next;
+              seen_chan[cid]=1;
+              print; next;
             }
-            in_skip_chan {
-              if (/<\/channel>/) in_skip_chan = 0
-              next
-            }
-          
-            # programme：先判断 start 是否当天，不是整块删
+
+            # programme处理
             /<programme / {
-              s = ""
-              if (match($0, /start="[^"]*"/)) {
-                s = substr($0, RSTART+7, RLENGTH-8)
+              start_str=""
+              chan_id=""
+              if(match($0, /start="[^"]+"/)){
+                start_str=substr($0,RSTART+7,RLENGTH-8);
               }
-              date = substr(s, 1, 8)
-          
-              if (date != today) {
-                in_skip_prog = 1
-                next
+              if(match($0, /channel="[^"]+"/)){
+                chan_id=substr($0,RSTART+9,RLENGTH-10);
               }
-          
-              c = ""
-              if (match($0, /channel="[^"]*"/)) {
-                c = substr($0, RSTART+9, RLENGTH-10)
+              prog_date=substr(start_str,1,8);
+
+              # 仅今日模式：只保留今天、明天，过滤更早
+              if(onlyToday=="true"){
+                if( prog_date != today && prog_date != tomorrow ){
+                  next;
+                }
               }
-          
-              key = c "," date
-              if (key != "," && key in seen_p && seen_p[key] < file_idx) {
-                in_skip_prog = 1
-              } else if (key != ",") {
-                seen_p[key] = file_idx
+
+              key=chan_id "|" prog_date;
+              # 同频道同一天，优先靠前源，后到直接丢弃
+              if( key != "|" && (key in seen_prog) ){
+                next;
               }
+              seen_prog[key]=file_idx;
+              print; next;
             }
-          
-            in_skip_prog {
-              if (/<\/programme>/) in_skip_prog = 0
-              next
-            }
-          
-            1
           ' temp_all.txt > temp_clean.txt
 
-          # ==================== 固定头部 ====================
-          cat > e.xml << 'EOF'
+          # 组装标准xmltv文档
+          cat > epg.xml <<'XMLHEAD'
           <?xml version="1.0" encoding="UTF-8"?>
           <tv generator-info-name="CCSH的聚合EPG" generator-info-url="https://github.com/CCSH/IPTV">
-          EOF
+          XMLHEAD
 
-          cat temp_clean.txt >> e.xml
-          echo "</tv>" >> e.xml
+          cat temp_clean.txt >> epg.xml
+          echo "</tv>" >> epg.xml
 
-          # 时区
-          sed -i 's/+0000/+0800/g' e.xml
+          # 时区修正 +0000 → +0800，清理脏字符
+          sed -i 's/+0000/+0800/g' epg.xml
+          sed -i 's/ *--免费使用//g' epg.xml
+          sed -i '/^[[:space:]]*$/d' epg.xml
 
-          # 压缩
-          gzip -9 -c e.xml > e.xml.gz
+          # 校验输出文件大小
+          OUT_SIZE=$(stat -c%s epg.xml)
+          if [[ $OUT_SIZE -lt 1000 ]]; then
+            echo "ERROR:输出EPG文件过小，数据异常"
+            exit 1
+          fi
+          echo "✅ 生成epg.xml 大小: $OUT_SIZE bytes"
 
-          # 清理
+          # 压缩gz
+          gzip -9 -c epg.xml > epg.xml.gz
+
+          # 清理临时文件
           rm -rf temp_*
 
-      - name: 提交并推送结果
+      - name: Git提交更新
         run: |
           git config --local user.name "github-actions[bot]"
           git config --local user.email "github-actions[bot]@users.noreply.github.com"
-
-          git add e.xml e.xml.gz
+          git add epg.xml epg.xml.gz
 
           if git diff --cached --quiet; then
-            echo "ℹ️ 无变更，跳过提交"
+            echo "ℹ️ EPG内容无变化，跳过commit&push"
           else
-            git commit -m "EPG Update: $(TZ=Asia/Shanghai date +'%Y-%m-%d %H:%M')(CST)"
+            git commit -m "EPG Auto Update: $(TZ=Asia/Shanghai date +'%Y‑%m‑%d %H:%M CST')"
             git push
-            echo "✅ 推送成功"
+            echo "✅ 已提交推送最新epg.xml / epg.xml.gz"
           fi
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
